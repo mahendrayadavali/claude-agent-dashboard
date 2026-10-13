@@ -8,6 +8,10 @@ export type Overview = {
   tasksDone: number
   notes: string[]
   folders: string[]
+  errors: number
+  errorsByTool: Record<string, number>
+  startedAt: number
+  recent: string[]
 }
 
 declare module 'claude-code' {

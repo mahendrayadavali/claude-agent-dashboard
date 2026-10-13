@@ -10,7 +10,10 @@ A small Claude Code mod that draws a live **Dashboard** pane: which agents are r
   - Projects: distinct folders you wrote to or edited.
   - Tasks: task-list items created, and how many are done.
   - Notes: distinct files written or edited.
-- **Tool calls**: bars for your most-used tools.
+- **Tool calls**: bars for your most-used tools, calls per minute, success rate and per-tool failure counts.
+- **Recent activity**: the last few tool calls with their target (file, command or pattern); failures in red.
+- **Session clock**: uptime in the header, plus a status-line entry (`◉ 2 live · 14 calls · 1 err`).
+- **Toasts**: a notice when an agent finishes or fails.
 - **Reply box**: text you type here is sent to Claude as a prompt.
 
 The progress bars count tool calls. Claude does not report a true percentage.
@@ -32,6 +35,8 @@ claude --plugin-dir /path/to/claude-agent-dashboard
 ```
 
 ## Use
+
+Slash commands: `/dashboard` opens the pane; `/dashboard summary` prints a session recap; `/dashboard files` lists files written; `/dashboard reset` zeroes the counters; `/dashboard help` shows usage.
 
 The pane opens when the session starts. Run `/dashboard` to open it again. If your screen has no room for a pane, the command says so and prints a one-line summary.
 
