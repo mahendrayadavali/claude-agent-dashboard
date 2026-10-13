@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementConstructor, InputProps, Register } from 'claude-code'
 
-import type { AgentRow, Overview } from '../types'
+import type { AgentRow, Overview, TokenUse, Tokens } from '../types'
 
 const PANE = 'agent-dashboard'
 const ACCENT = '#d97757'
@@ -66,9 +66,28 @@ const target = (args: Record<string, unknown>) => {
   return ''
 }
 
-const HELP = 'Usage: /dashboard [open | summary | files | reset | help]'
+const HELP = 'Usage: /dashboard [open | summary | tokens | files | reset | help]'
 
 const MAX_AGENTS = 20
+
+const ZERO: TokenUse = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, steps: 0, startup: 0 }
+const tokens = atom({ plugin: 'agent-dashboard', key: 'tokens' } as const, { main: ZERO, agents: {} } as Tokens)
+const sum = (u: TokenUse) => u.input + u.output + u.cacheRead + u.cacheWrite
+const kfmt = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`)
+
+// Add one model request's usage. The first request of an agent is its start-up cost:
+// the instructions and context it reads before doing any work.
+const addUse = (u: TokenUse, x: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }): TokenUse => {
+  const step = x.input_tokens + x.output_tokens + x.cache_read_input_tokens + x.cache_creation_input_tokens
+  return {
+    input: u.input + x.input_tokens,
+    output: u.output + x.output_tokens,
+    cacheRead: u.cacheRead + x.cache_read_input_tokens,
+    cacheWrite: u.cacheWrite + x.cache_creation_input_tokens,
+    steps: u.steps + 1,
+    startup: u.steps === 0 ? step : u.startup,
+  }
+}
 let ticker: { cancel: () => void } | undefined
 
 // Dashboard writes must never block or fail a tool call.
@@ -84,7 +103,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'dashboard',
-      description: 'Open the agent dashboard pane (summary, files, reset)',
+      description: 'Open the agent dashboard pane (summary, tokens, files, reset)',
     })
     void $.ui.open({ id: PANE, title: 'Dashboard' })
     const t0 = await $.clock.now()
@@ -161,7 +180,21 @@ export const register: Register = on => {
         startedAt: now,
       }))
       await update($, history, () => [])
+      await update($, tokens, () => ({ main: ZERO, agents: {} }))
       return { text: 'Dashboard counters reset.' }
+    }
+
+    if (sub === 'tokens') {
+      const t = await read($, tokens)
+      const rows = Object.values(t.agents).sort((a, b) => sum(b) - sum(a))
+      const agentTotal = rows.reduce((n, a) => n + sum(a), 0)
+      const cost = (await $.session.usage().catch(() => undefined))?.cost?.usd
+      return {
+        text: [
+          `Main session ${kfmt(sum(t.main))} tokens · agents ${kfmt(agentTotal)} across ${rows.length}${cost != null ? ` · $${cost.toFixed(2)} so far` : ''}`,
+          ...rows.slice(0, 10).map(a => `  ${a.name}: ${kfmt(sum(a))} (start-up ${kfmt(a.startup)}, ${a.steps} requests)`),
+        ].join('\n'),
+      }
     }
 
     if (sub === 'files') {
@@ -249,6 +282,25 @@ export const register: Register = on => {
     }
   })
 
+  on('turn.step', async function* ($, e, next) {
+    const r = yield* next(e)
+    const usage = r?.usage
+    if (usage) {
+      const id = e.agentId
+      const name = id ? (await read($, agents).catch(() => [] as AgentRow[])).find(a => a.id === id)?.name ?? 'agent' : ''
+      await safe(() =>
+        update($, tokens, t => {
+          if (!id) return { ...t, main: addUse(t.main, usage) }
+          const prev = t.agents[id] ?? { ...ZERO, name }
+          const rows = { ...t.agents, [id]: { ...addUse(prev, usage), name: name || prev.name } }
+          const kept = Object.entries(rows).slice(-50)
+          return { ...t, agents: Object.fromEntries(kept) }
+        }),
+      )
+    }
+    return r
+  })
+
   on('ui.input', { element: 'reply' }, async ($, e, next) => {
     if (e.kind === 'submit' && e.value.trim()) {
       void $.prompt.submit({ text: e.value.trim() })
@@ -263,6 +315,15 @@ export const register: Register = on => {
     const list = await read($, agents)
     const stats = await read($, overview)
     const hist = await read($, history)
+    const tk = await read($, tokens)
+    const cost = (await $.session.usage().catch(() => undefined))?.cost?.usd
+    const tkRows = Object.entries(tk.agents).sort((a, b) => sum(b[1]) - sum(a[1]))
+    const agentTk = tkRows.reduce((n, [, a]) => n + sum(a), 0)
+    const startup = tkRows.reduce((n, [, a]) => n + a.startup, 0)
+    const allTk = sum(tk.main) + agentTk
+    const inputSide = tk.main.input + tk.main.cacheRead + tk.main.cacheWrite + tkRows.reduce((n, [, a]) => n + a.input + a.cacheRead + a.cacheWrite, 0)
+    const cached = tk.main.cacheRead + tkRows.reduce((n, [, a]) => n + a.cacheRead, 0)
+    const tkPeak = tkRows[0] ? sum(tkRows[0][1]) : 0
     const now = await $.clock.now()
     const upMs = stats.startedAt ? now - stats.startedAt : 0
     const live = list.filter(a => LIVE.includes(a.status)).length
@@ -315,6 +376,7 @@ export const register: Register = on => {
                   {'    '}
                   {a.task}
                   {calls ? ` · ${calls} tool calls` : ''}
+                  {(u => (u ? ` · ${kfmt(sum(u))} tokens` : ''))(tk.agents[a.id])}
                 </Text>
                 <Text color={isLive ? ACCENT : undefined} dimColor={!isLive}>
                   {'    '}
@@ -323,6 +385,32 @@ export const register: Register = on => {
               </Box>
             )
           })}
+        </Box>
+
+        <Box flexDirection="column" borderStyle="round" paddingX={1}>
+          <Text bold>Tokenomics</Text>
+          <Text dimColor>WHERE THE TOKENS WENT</Text>
+          <Text>
+            <Text bold color={ACCENT}>
+              {kfmt(allTk)}
+            </Text>{' '}
+            <Text dimColor>tokens this session{cost != null ? ` · $${cost.toFixed(2)}` : ''}</Text>
+          </Text>
+          <Text dimColor>
+            Main {kfmt(sum(tk.main))} · agents {kfmt(agentTk)}
+            {inputSide ? ` · ${Math.round((cached / inputSide) * 100)}% read from cache` : ''}
+          </Text>
+          {agentTk > 0 && (
+            <Text dimColor>
+              Agent start-up {kfmt(startup)} ({Math.round((startup / agentTk) * 100)}% of agent tokens)
+            </Text>
+          )}
+          {tkRows.length === 0 && <Text dimColor>No agent requests yet.</Text>}
+          {tkRows.slice(0, 6).map(([, a]) => (
+            <Text>
+              <Text color={ACCENT}>{bar(sum(a), tkPeak, 14)}</Text> {kfmt(sum(a))} <Text dimColor>{a.name}</Text>
+            </Text>
+          ))}
         </Box>
 
         <Box flexDirection="column" borderStyle="round" paddingX={1}>

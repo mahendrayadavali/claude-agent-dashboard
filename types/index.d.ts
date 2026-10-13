@@ -1,4 +1,14 @@
 export type AgentRow = { id: string; name: string; task: string; status: string }
+export type TokenUse = {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  steps: number
+  startup: number
+}
+export type Tokens = { main: TokenUse; agents: Record<string, TokenUse & { name: string }> }
+
 export type Overview = {
   tools: number
   done: number
@@ -17,6 +27,6 @@ export type Overview = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'agent-dashboard': { agents: AgentRow[]; overview: Overview; history: number[] }
+    'agent-dashboard': { agents: AgentRow[]; overview: Overview; history: number[]; tokens: Tokens }
   }
 }

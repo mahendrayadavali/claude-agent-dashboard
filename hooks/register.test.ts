@@ -29,3 +29,11 @@ test('/dashboard summary reports the session', async ($, on) => {
   const out = await $.command.run({ command: 'dashboard', args: 'summary' } as never)
   expect(JSON.stringify(out)).toContain('tool calls')
 })
+
+test('the pane has a Tokenomics section and /dashboard tokens answers', async ($, on) => {
+  mock.clock(on)
+  const tree = await $.ui.render({ component: 'Pane', requestId: 'agent-dashboard', surface: 'terminal', props: {} } as never)
+  expect(JSON.stringify(tree)).toContain('Tokenomics')
+  const out = await $.command.run({ command: 'dashboard', args: 'tokens' } as never)
+  expect(JSON.stringify(out)).toContain('Main session')
+})
