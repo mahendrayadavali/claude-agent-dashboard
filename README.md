@@ -5,7 +5,7 @@ A small Claude Code mod that draws a live **Dashboard** pane: which agents are r
 ## What it shows
 
 - **Agents live**: a count of running or queued agents, with a small chart of the last 24 seconds.
-- **Your agents**: each agent's name, task and status (Thinking, Running, Queued, Done, Failed), with a bar that fills as the agent makes tool calls.
+- **Your agents**: each agent's name, task and status (Thinking, Running, Queued, Done, Failed, Stopped), with a bar that fills as the agent makes tool calls. Finished agents stay listed (up to 20), and running ones are never dropped to make room.
 - **Second brain**: a node graph that lights up as you work, with three counts.
   - Projects: distinct folders you wrote to or edited.
   - Tasks: task-list items created, and how many are done.

@@ -16,6 +16,7 @@ const overview = atom(
     perAgent: {},
     tasks: 0,
     tasksDone: 0,
+    doneTasks: [],
     notes: [],
     folders: [],
     errors: 0,
@@ -67,6 +68,18 @@ const target = (args: Record<string, unknown>) => {
 
 const HELP = 'Usage: /dashboard [open | summary | files | reset | help]'
 
+const MAX_AGENTS = 20
+let ticker: { cancel: () => void } | undefined
+
+// Dashboard writes must never block or fail a tool call.
+const safe = async (work: () => Promise<unknown>) => {
+  try {
+    await work()
+  } catch {
+    // ignore: a counter is not worth failing a tool call over
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -78,16 +91,25 @@ export const register: Register = on => {
     await update($, overview, o => (o.startedAt ? o : { ...o, startedAt: t0 }))
 
     const seen = new Map<string, string>()
-    $.clock.every(1000, async () => {
+    ticker?.cancel()
+    ticker = $.clock.every(1000, async () => {
       const list = await $.agent.list()
-      await update($, agents, () =>
-        list.map(a => ({
-          id: a.id,
-          name: a.name ?? a.type,
-          task: a.description,
-          status: a.status,
-        })),
-      )
+      // Merge instead of replace, so finished agents stay listed after the engine drops them.
+      await update($, agents, prev => {
+        const rows = new Map(prev.map(a => [a.id, a]))
+        for (const a of list) {
+          rows.set(a.id, { id: a.id, name: a.name ?? a.type, task: a.description, status: a.status })
+        }
+        const current = new Set(list.map(a => a.id))
+        for (const [id, a] of rows) {
+          if (!current.has(id) && LIVE.includes(a.status)) rows.set(id, { ...a, status: 'completed' })
+        }
+        // Keep live agents first when trimming, so a long-running one is never dropped.
+        const all = [...rows.values()]
+        const live = all.filter(a => LIVE.includes(a.status))
+        const done = all.filter(a => !LIVE.includes(a.status))
+        return [...done.slice(-Math.max(0, MAX_AGENTS - live.length)), ...live]
+      })
       // Toast when an agent changes to a finished state.
       for (const a of list) {
         const prev = seen.get(a.id)
@@ -130,6 +152,7 @@ export const register: Register = on => {
         perAgent: {},
         tasks: 0,
         tasksDone: 0,
+        doneTasks: [],
         notes: [],
         folders: [],
         errors: 0,
@@ -181,29 +204,49 @@ export const register: Register = on => {
     const path = typeof args.file_path === 'string' ? args.file_path : ''
     const agentId = (e as unknown as { agentId?: string }).agentId
     const label = `${e.tool} ${target(args)}`.trim()
-    await update($, overview, o => ({
-      ...o,
-      tools: o.tools + 1,
-      byTool: { ...o.byTool, [e.tool]: (o.byTool[e.tool] ?? 0) + 1 },
-      perAgent: agentId ? { ...o.perAgent, [agentId]: (o.perAgent[agentId] ?? 0) + 1 } : o.perAgent,
-      tasks: e.tool === 'TaskCreate' ? o.tasks + 1 : o.tasks,
-      tasksDone:
-        e.tool === 'TaskUpdate' && args.status === 'completed' ? o.tasksDone + 1 : o.tasksDone,
-      notes: path && (e.tool === 'Write' || e.tool === 'Edit') ? push(o.notes, path) : o.notes,
-      folders: path ? push(o.folders, dirOf(path)) : o.folders,
-      recent: [...o.recent, label].slice(-8),
-    }))
-    const ran = await next(e)
-    const failed = Boolean((ran as { isError?: boolean; deny?: string }).isError || (ran as { deny?: string }).deny)
-    await update($, overview, o => ({
-      ...o,
-      done: o.done + 1,
-      errors: failed ? o.errors + 1 : o.errors,
-      errorsByTool: failed ? { ...o.errorsByTool, [e.tool]: (o.errorsByTool[e.tool] ?? 0) + 1 } : o.errorsByTool,
-      recent: failed ? [...o.recent.slice(0, -1), `✗ ${label}`] : o.recent,
-    }))
+    const kept = new Set((await read($, agents).catch(() => [] as AgentRow[])).map(a => a.id))
+    await safe(() =>
+      update($, overview, o => {
+        const perAgent = agentId ? { ...o.perAgent, [agentId]: (o.perAgent[agentId] ?? 0) + 1 } : o.perAgent
+        // Drop counts for agents no longer listed, so the map stays small.
+        const pruned = Object.fromEntries(Object.entries(perAgent).filter(([id]) => id === agentId || kept.has(id)))
+        return {
+          ...o,
+          tools: o.tools + 1,
+          byTool: { ...o.byTool, [e.tool]: (o.byTool[e.tool] ?? 0) + 1 },
+          perAgent: pruned,
+          notes: path && (e.tool === 'Write' || e.tool === 'Edit') ? push(o.notes, path) : o.notes,
+          folders: path ? push(o.folders, dirOf(path)) : o.folders,
+          recent: [...o.recent, label].slice(-8),
+        }
+      }),
+    )
 
-    return ran
+    let failed = true
+    try {
+      const ran = await next(e)
+      failed = Boolean((ran as { isError?: boolean; deny?: string }).isError || (ran as { deny?: string }).deny)
+      return ran
+    } finally {
+      const taskId = typeof args.taskId === 'string' ? args.taskId : ''
+      await safe(() =>
+        update($, overview, o => {
+          // Count a task once when it is created, and once when it first completes.
+          const isNewDone =
+            !failed && e.tool === 'TaskUpdate' && args.status === 'completed' && taskId && !o.doneTasks.includes(taskId)
+          return {
+            ...o,
+            done: o.done + 1,
+            tasks: !failed && e.tool === 'TaskCreate' ? o.tasks + 1 : o.tasks,
+            tasksDone: isNewDone ? o.tasksDone + 1 : o.tasksDone,
+            doneTasks: isNewDone ? [...o.doneTasks, taskId].slice(-500) : o.doneTasks,
+            errors: failed ? o.errors + 1 : o.errors,
+            errorsByTool: failed ? { ...o.errorsByTool, [e.tool]: (o.errorsByTool[e.tool] ?? 0) + 1 } : o.errorsByTool,
+            recent: failed ? [...o.recent.slice(0, -1), `✗ ${label}`] : o.recent,
+          }
+        }),
+      )
+    }
   })
 
   on('ui.input', { element: 'reply' }, async ($, e, next) => {

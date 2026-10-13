@@ -6,6 +6,7 @@ export type Overview = {
   perAgent: Record<string, number>
   tasks: number
   tasksDone: number
+  doneTasks: string[]
   notes: string[]
   folders: string[]
   errors: number
