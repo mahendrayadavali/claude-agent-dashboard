@@ -1,0 +1,5 @@
+{
+  "name": "claude-agent-dashboard",
+  "owner": { "name": "mahendrayadavali" },
+  "plugins": [{ "name": "agent-dashboard", "source": "./" }]
+}

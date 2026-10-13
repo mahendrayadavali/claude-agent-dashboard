@@ -1,0 +1,1 @@
+{ "name": "agent-dashboard", "version": "0.1.0", "description": "Live dashboard pane: your agents and what they are doing, plus a session overview.", "types": "./types/index.d.ts", "license": "MIT" }
